@@ -1,124 +1,115 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# Konakai Calendar Scraper
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+A NestJS backend that scrapes the [Club Konakai calendar](https://clubkonakai.noblehcalendar.com), normalizes events into a clean schema, and serves them over a small HTTP API. Recurring ("staple") events like weekly Happy Hour are flagged separately from one-off events, so consumers can default to showing only what's special.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+## How it works
 
-## Description
+1. **Scrape** (`src/events/scraper.service.ts`) — fetches the calendar page HTML and parses it with [cheerio](https://cheerio.js.org/). The page is server-rendered by WordPress/MEC, so no headless browser is needed.
+2. **Normalize** (`src/events/normalize.ts`) — derives `day_of_week`/`month`/`day` from the scraped ISO date, splits time ranges into `time_start`/`time_end`, and classifies **staples**: any event title appearing 3+ times in a scrape is a staple.
+3. **Cache** (`src/events/event-cache.service.ts`) — holds the normalized events in memory, with an optional JSON snapshot on disk so the cache survives a restart. Reads are always instant; a refresh swaps in new data only once the scrape completes, so a request during a refresh still gets the last-good data.
+4. **Schedule** (`src/events/scraper-scheduler.service.ts`) — re-scrapes on a cron schedule (default: daily, 6 AM `America/Los_Angeles`).
+5. **API** (`src/events/events.controller.ts`) — serves the cached data.
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+## Setup
 
-## Project setup
+Requires Node 20+ and [pnpm](https://pnpm.io/).
 
 ```bash
-$ pnpm install
+pnpm install
+cp .env.example .env
 ```
 
-## Compile and run the project
+### Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `SCRAPE_URL` | `https://clubkonakai.noblehcalendar.com` | Calendar page to scrape |
+| `PORT` | `3000` | HTTP port |
+| `SCRAPE_CRON` | `0 6 * * *` | Cron expression for the scheduled re-scrape (runs in `America/Los_Angeles`) |
+| `SNAPSHOT_PATH` | *(unset)* | Path to persist a JSON snapshot of the cache to disk, e.g. `./data/events-snapshot.json`. If unset, the cache is memory-only and starts empty on every restart until the first scrape completes. |
+
+## Running
 
 ```bash
-# development
-$ pnpm run start
-
-# watch mode
-$ pnpm run start:dev
-
-# production mode
-$ pnpm run start:prod
+pnpm start          # single run
+pnpm start:dev      # watch mode
+pnpm start:prod     # run the compiled build (pnpm build first)
 ```
 
-## Run tests
+On startup the app scrapes immediately and populates the cache before serving `/events`. If that initial scrape fails, the app still starts — `/events` will 500 until a scrape succeeds (scheduled or manual via `/events/refresh`).
+
+## API
+
+All responses share this envelope:
+
+```json
+{
+  "scraped_at": "2026-09-21T09:00:00Z",
+  "total": 137,
+  "returned": 18,
+  "events": [ /* KonakaiEvent[] */ ]
+}
+```
+
+- `total` — number of events currently in the cache
+- `returned` — number of events after filtering
+- `scraped_at` — when the underlying cache data was last scraped
+
+### `GET /events`
+
+Returns cached events, instantly, filtered by the following optional query params:
+
+| Param | Example | Effect |
+|---|---|---|
+| `staples` | `?staples=false` | Omit staple (recurring) events, returning one-offs only. Any other value (including omitting the param) returns everything. |
+| `from` | `?from=2026-10-01` | Only events on or after this ISO date |
+| `to` | `?to=2026-10-31` | Only events on or before this ISO date |
+
+Params can be combined, e.g. `GET /events?staples=false&from=2026-10-01&to=2026-10-31`.
+
+### `GET /events/refresh`
+
+Triggers an immediate re-scrape and returns the full, refreshed event set once it completes. Concurrent calls (including one already running from the schedule) share a single in-flight scrape rather than starting duplicate ones.
+
+### `KonakaiEvent` shape
+
+```typescript
+interface KonakaiEvent {
+  event_id: string;
+  event_url: string;
+
+  date: string;               // ISO 8601, e.g. "2026-09-18"
+  day_of_week: string;        // "Friday"
+  month: string;              // "September"
+  day: number;                // 18
+  time_start: string | null;  // "5:00 pm"
+  time_end: string | null;    // "9:00 pm"
+  all_day: boolean;
+
+  title: string;
+  description: string | null; // plain text, newline-separated
+  location: string | null;
+  image_url: string | null;
+  color: string | null;       // hex color from the event tag, e.g. "#fdd700"
+
+  is_staple: boolean;         // true if this title appears 3+ times in the scraped set
+  recurrence_count: number;   // how many times this exact title appears
+}
+```
+
+## Testing
 
 ```bash
-# unit tests
-$ pnpm run test
-
-# e2e tests
-$ pnpm run test:e2e
-
-# test coverage
-$ pnpm run test:cov
+pnpm test         # unit tests
+pnpm test:e2e     # e2e tests (boots the app with the scraper mocked)
+pnpm test:cov     # coverage
 ```
 
-## Deployment
+Scraper unit tests run against `test/fixtures/konakai-calendar-sample.html`, a trimmed excerpt of real markup fetched from the live site (not hand-written HTML), so extraction logic is validated against the site's actual structure.
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+## Notes on the source site
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+The calendar is a WordPress site running the Modern Events Calendar plugin. Two things worth knowing if the site's markup changes and the scraper needs updating:
 
-```bash
-$ pnpm install -g @nestjs/mau
-$ mau deploy
-```
-
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
-
-## Observability
-
-In production applications, observability is essential for understanding how your system behaves, detecting issues early, and maintaining reliable performance.
-
-[NestJS Observe](https://observe.nestjs.com) automatically instruments your NestJS application, giving you deep visibility into your system with minimal setup:
-
-- **Distributed tracing:** Follow requests across services and understand how they flow through your system.
-- **Waterfall analysis:** Visualize request execution and identify slow operations, bottlenecks, and unexpected delays.
-- **Performance analysis:** Analyze application performance in real time and quickly pinpoint areas that need optimization.
-- **Metrics:** Track key application and infrastructure metrics to understand system health and performance trends.
-- **Logging:** Centralize and correlate logs with traces and other telemetry to make debugging easier.
-- **Error tracking:** Detect errors quickly and investigate their root causes with the surrounding context.
-- **SLA monitoring:** Track service-level objectives and identify when your application is approaching or exceeding defined thresholds.
-- **Alarms and alerts:** Set up alerts for critical errors, performance degradation, SLA violations, and other anomalies so your team can react quickly.
-
-To add it to this project:
-
-```bash
-$ pnpm install @nestjs/observe
-```
-
-Then follow the [setup guide](https://docs.nestjs.com/observability/overview) - it takes a single import and an app key.
-
-The free plan needs no payment details and covers 300,000 events a month. You can also browse the [live demo](https://www.observe-demo.nestjs.com/dashboard) first - the whole dashboard over a busy service's data, with nothing to install.
-
-## Resources
-
-Check out a few resources that may come in handy when working with NestJS:
-
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Auto-instrument your application with [NestJS Observe](https://observe.nestjs.com). Distributed tracing, metrics, and logging made easy. Error tracking and performance monitoring for your NestJS applications.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
-
-## Support
-
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+- The event date and past-event flag are read from the `.mec-masonry-item-wrap` element that wraps each `.mec-event-article` (`data-sort-masonry="2026-09-22"` / class `mec-past-event`), not from the article itself — that wrapper is the only place the full date (including year) actually appears.
+- `extractEvents()` in `scraper.service.ts` is a pure function over raw HTML, independent of the network fetch, so selector changes can be diagnosed by saving a fresh page fetch and re-running the unit tests against it.
