@@ -49,6 +49,9 @@ lerna-debug.log*
 .temp
 .tmp
 
+# scraped event cache snapshot (SNAPSHOT_PATH)
+/data
+
 # Runtime data
 pids
 *.pid

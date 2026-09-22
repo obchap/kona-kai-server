@@ -60,4 +60,28 @@ describe('ScraperSchedulerService', () => {
     await expect(job.fireOnTick()).resolves.toBeUndefined();
     void job.stop();
   });
+
+  it('stops the cron job on module destroy', () => {
+    const addCronJob = vi.fn();
+    const jobs = new Map<string, CronJob>();
+    const scheduler = {
+      addCronJob: (name: string, job: CronJob) => {
+        addCronJob(name, job);
+        jobs.set(name, job);
+      },
+      getCronJob: (name: string) => jobs.get(name)!,
+    } as unknown as SchedulerRegistry;
+    const cache = { refresh: vi.fn() } as unknown as EventCacheService;
+    const config = fakeConfig({});
+
+    const service = new ScraperSchedulerService(cache, config, scheduler);
+    service.onModuleInit();
+
+    const [, job] = addCronJob.mock.calls[0] as [string, CronJob];
+    expect(job.isActive).toBe(true);
+
+    service.onModuleDestroy();
+
+    expect(job.isActive).toBe(false);
+  });
 });

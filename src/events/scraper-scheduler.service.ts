@@ -1,4 +1,9 @@
-import { Injectable, Logger, type OnModuleInit } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  type OnModuleDestroy,
+  type OnModuleInit,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { SchedulerRegistry } from '@nestjs/schedule';
 import { CronJob } from 'cron';
@@ -15,7 +20,9 @@ const JOB_NAME = 'daily-calendar-scrape';
  * defined, before Nest has loaded the config module.
  */
 @Injectable()
-export class ScraperSchedulerService implements OnModuleInit {
+export class ScraperSchedulerService
+  implements OnModuleInit, OnModuleDestroy
+{
   private readonly logger = new Logger(ScraperSchedulerService.name);
 
   constructor(
@@ -46,6 +53,10 @@ export class ScraperSchedulerService implements OnModuleInit {
     this.logger.log(
       `Scheduled daily scrape "${cronExpression}" (${CALENDAR_TIMEZONE})`,
     );
+  }
+
+  onModuleDestroy(): void {
+    void this.scheduler.getCronJob(JOB_NAME).stop();
   }
 
   private async runScheduledRefresh(): Promise<void> {
