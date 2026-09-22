@@ -32,7 +32,13 @@ export class EventCacheService implements OnModuleInit {
   async onModuleInit(): Promise<void> {
     await this.loadSnapshotFromDisk();
     if (!this.snapshot) {
-      await this.refresh();
+      try {
+        await this.refresh();
+      } catch (error) {
+        this.logger.error(
+          `Initial scrape failed, starting with an empty cache: ${(error as Error).message}`,
+        );
+      }
     }
   }
 
@@ -53,6 +59,18 @@ export class EventCacheService implements OnModuleInit {
 
   private async doRefresh(): Promise<EventCacheSnapshot> {
     const scraped = await this.scraper.scrape();
+
+    // A scrape returning nothing almost always means the site's markup (or
+    // selectors) changed, not that the calendar is genuinely empty. Keep
+    // serving the last-good snapshot rather than overwriting it with an
+    // empty one.
+    if (scraped.length === 0 && this.snapshot) {
+      this.logger.warn(
+        'Scrape returned 0 events; keeping the previous snapshot instead of overwriting it',
+      );
+      return this.snapshot;
+    }
+
     const snapshot: EventCacheSnapshot = {
       scraped_at: new Date().toISOString(),
       events: normalizeEvents(scraped),

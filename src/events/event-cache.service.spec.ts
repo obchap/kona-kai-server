@@ -120,4 +120,43 @@ describe('EventCacheService', () => {
 
     expect(cache.getSnapshot().events[0]?.title).toBe('Fresh');
   });
+
+  it('keeps the previous snapshot when a refresh scrapes 0 events', async () => {
+    const scrape = vi
+      .fn()
+      .mockResolvedValueOnce([scrapedEvent({ title: 'Good data' })])
+      .mockResolvedValueOnce([]);
+    const scraper = { scrape } as unknown as ScraperService;
+    const cache = new EventCacheService(scraper, fakeConfig({}));
+
+    await cache.refresh();
+    const secondSnapshot = await cache.refresh();
+
+    expect(secondSnapshot.events[0]?.title).toBe('Good data');
+    expect(cache.getSnapshot().events[0]?.title).toBe('Good data');
+  });
+
+  it('accepts a 0-event scrape when there is no previous snapshot to protect', async () => {
+    const scraper = {
+      scrape: vi.fn().mockResolvedValue([]),
+    } as unknown as ScraperService;
+    const cache = new EventCacheService(scraper, fakeConfig({}));
+
+    const snapshot = await cache.refresh();
+
+    expect(snapshot.events).toHaveLength(0);
+  });
+
+  it('starts with an empty (unpopulated) cache rather than crashing when the initial scrape fails', async () => {
+    const scraper = {
+      scrape: vi.fn().mockRejectedValue(new Error('site is down')),
+    } as unknown as ScraperService;
+    const config = fakeConfig({
+      SNAPSHOT_PATH: join(snapshotDir, 'does-not-exist.json'),
+    });
+    const cache = new EventCacheService(scraper, config);
+
+    await expect(cache.onModuleInit()).resolves.toBeUndefined();
+    expect(() => cache.getSnapshot()).toThrow();
+  });
 });
